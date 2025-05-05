@@ -1,0 +1,204 @@
+services:  # Define all containers u are about to launch
+  zookeeper:  # Required by kafka for coordination and metadata
+      image: confluentinc/cp-zookeeper:7.4.0 # Uses the zookeeper image from confluent 'the company behind kafka'
+      hostname: zookeeper # Internal network hostname
+      container_name: zookeeper
+      ports:
+        - "2181:2181" # Maps local port 2181 to container port  2181
+      environment:
+        ZOOKEEPER_CLIENT_PORT: 2181
+        ZOOKEEPER_TICK_TIME: 2000 # 2 seconds for internal time , used for heartbeats, session timeout ...
+      healthcheck: # Optional but helpful for reliability : if zookeeper works correctly
+        test: ['CMD', 'bash', '-c', "echo 'ruok' | nc localhost 2181"] #test command , inside the container with bash as a command Interpreter , ruok : are u ok ? , nc : netcat , send the message to localhost on 2181, and if zookeeper is ok , will respond with imok.
+        interval: 10s # Runs the health check every 10s 
+        timeout: 5s # Gives each check up 5s to succed
+        retries: 5 # Try 5 times before marking the service as unhealthy 
+      networks:
+        - confluent #connects this service to the custom docker network named confluent
+
+  broker:
+    image: confluentinc/cp-server:7.4.0
+    hostname: broker
+    container_name: broker
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9101:9101" # Export kafka JMX for metrcis monitoring
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092 #Kafka tells clients how to connect: broker:29092 inside Docker, localhost:9092 from host.
+      KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092
+      CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
+      CONFLUENT_METRICS_ENABLE: 'false'
+      CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
+    networks:
+      - confluent # Adds the broker ti the shared docker network 
+    healthcheck:
+      test: [ "CMD", "bash", "-c", 'nc -z localhost 9092' ] #-z used to scan if kafka's port is open ?
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  schema-registry:  # Manages  data schemas for kafka
+    image: confluentinc/cp-schema-registry:7.4.0  # Docker image to use
+    hostname: schema-registry  # Hostname inside Docker network
+    container_name: schema-registry  # Name of the container
+    depends_on:  # Wait for broker to be ready before starting
+      broker:
+        condition: service_healthy
+    ports:
+      - "8081:8081"  # Expose schema registry on port 8081
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry  # Used internally
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'broker:29092'  # Kafka to connect to
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081  # Listen on all interfaces, port 8081
+    networks:
+      - confluent  # Join the Docker network called "confluent"
+    healthcheck:  # Check if schema registry is healthy
+      test: [ "CMD", "curl", "-f", "http://localhost:8081/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  
+  control-center: # Kafka UI to monitor topics, brokers, etc
+    image: confluentinc/cp-enterprise-control-center:7.4.0
+    hostname: control-center
+    container_name: control-center
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'broker:29092'  # Kafka connection
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"  # Schema registry URL
+      CONTROL_CENTER_REPLICATION_FACTOR: 1  # Replication factor for internal topics
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1  # Partition count for internal topics
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1  # Monitoring topic partitions
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1  # Metrics topic replication factor
+      CONFLUENT_METRICS_ENABLE: 'false'  # Disable Confluent metrics (free tier)
+      PORT: 9021  # Internal port
+    networks:
+      - confluent
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9021/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  webserver: # Airflow UI for dags
+    image: apache/airflow:2.6.0-python3.9  # Airflow image with Python 3.9
+    command: webserver  # Start webserver process
+    entrypoint: ['/opt/airflow/script/entrypoint.sh']  # Custom entrypoint script
+    depends_on:
+      - postgres  # Wait for PostgreSQL DB before starting
+    environment:
+      - LOAD_EX=n  # Do not load example DAGs
+      - EXECUTOR=Sequential  # Use SequentialExecutor (simple, for dev)
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow  # DB connection string
+      - AIRFLOW_WEBSERVER_SECRET_KEY=this_is_a_very_secured_key  # Flask secret key
+    logging:
+      options:
+        max-size: 10m  # Limit log file size to 10MB
+        max-file: "3"  # Keep up to 3 log files
+    volumes:
+      - ./dags:/opt/airflow/dags  # Mount local DAGs folder into container
+      - ./script/entrypoint.sh:/opt/airflow/script/entrypoint.sh  # Mount custom script
+      - ./requirements.txt:/opt/airflow/requirements.txt  # Mount dependencies
+    ports:
+      - "8080:8080"  # Expose web UI on localhost:8080
+    healthcheck:
+      test: ['CMD-SHELL', "[ -f /opt/airflow/airflow-webserver.pid ]"]  # Check if webserver started
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    networks:
+      - confluent
+
+  scheduler: # Airflow scheduler that runs DAG tasks
+    image: apache/airflow:2.6.0-python3.9  # Same image as webserver
+    depends_on:
+      webserver:
+        condition: service_healthy  # Wait for webserver to be ready
+    volumes:
+      - ./dags:/opt/airflow/dags  # DAGs folder
+      - ./script/entrypoint.sh:/opt/airflow/script/entrypoint.sh  # Entry script
+      - ./requirements.txt:/opt/airflow/requirements.txt  # Python dependencies
+    environment:
+      - LOAD_EX=n
+      - EXECUTOR=Sequential
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW_WEBSERVER_SECRET_KEY=this_is_a_very_secured_key
+    command: bash -c "pip install -r ./requirements.txt && airflow db upgrade && airflow scheduler"  # Install dependencies and run scheduler
+    networks:
+      - confluent
+
+
+  postgres: 
+    image: postgres:14.0  # Official Postgres image
+    environment:
+      - POSTGRES_USER=airflow  # DB username
+      - POSTGRES_PASSWORD=airflow  # DB password
+      - POSTGRES_DB=airflow  # DB name
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - confluent
+
+  spark-master: # Master node
+    image: bitnami/spark:latest  # Spark image
+    command: bin/spark-class org.apache.spark.deploy.master.Master  # Start Spark master process
+    ports:
+      - "9090:8080"  # Spark UI: host 9090 → container 8080
+      - "7077:7077"  # Spark master port for workers
+    networks:
+      - confluent
+
+  spark-worker: #Worker node
+    image: bitnami/spark:latest
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077  # Connect to master
+    depends_on:
+      - spark-master  # Wait for master to start
+    environment:
+      SPARK_MODE: worker  # Set mode to worker
+      SPARK_WORKER_CORES: 2  # Assign 2 CPU cores
+      SPARK_WORKER_MEMORY: 1g  # 1 GB RAM for this worker
+      SPARK_MASTER_URL: spark://spark-master:7077  # Address of master
+    networks:
+      - confluent
+
+  cassandra_db:
+    image: cassandra:latest  # Cassandra image
+    container_name: cassandra
+    hostname: cassandra
+    ports:
+      - "9042:9042"  # Expose Cassandra CQL port
+    environment:
+      - MAX_HEAP_SIZE=512M  # Max heap memory
+      - HEAP_NEWSIZE=100M  # Young generation heap size
+      - CASSANDRA_USERNAME=cassandra  # Username (not used by default image)
+      - CASSANDRA_PASSWORD=cassandra  # Password (also not used by default image)
+    networks:
+      - confluent
+
+networks:
+  confluent: # Defin a shared network for all services
