@@ -1,13 +1,14 @@
 import uuid
 from datetime import datetime
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow import DAG # Airflow dag for workflow scheduling
+from airflow.operators.python import PythonOperator # To run python functions as tasks
 
 default_args = {
-    'owner': 'airscholar',
-    'start_date': datetime(2023, 9, 3, 10, 00)
+    'owner': 'Hamza',
+    'start_date': datetime(2025, 5, 5, 10, 00) 
 }
 
+# Function to get the data from random user api 
 def get_data():
     import requests
 
@@ -17,10 +18,12 @@ def get_data():
 
     return res
 
+# function to reformat and clean the api response
 def format_data(res):
     data = {}
     location = res['location']
-    data['id'] = uuid.uuid4()
+
+    data['id'] = uuid.uuid4() # Generate a unique ID
     data['first_name'] = res['name']['first']
     data['last_name'] = res['name']['last']
     data['gender'] = res['gender']
@@ -36,22 +39,26 @@ def format_data(res):
 
     return data
 
+# Function to continuously stream data to kafka for 60s
 def stream_data():
     import json
     from kafka import KafkaProducer
-    import time
-    import logging
+    import time # For handling timing
+    import logging # For handling errors
 
+    # Create producer to send messages to the topic & Connect to the Kafka broker (running inside Docker, port 29092), 5s wait
     producer = KafkaProducer(bootstrap_servers=['broker:29092'], max_block_ms=5000)
-    curr_time = time.time()
+    
+    curr_time = time.time() # Record current timeStamp
 
-    while True:
+    while True: 
         if time.time() > curr_time + 60: #1 minute
-            break
+            break 
         try:
-            res = get_data()
-            res = format_data(res)
-
+            res = get_data() # fetch raw data
+            res = format_data(res) # Transform it 
+            
+            #Send the data as json-encoded string to 'users_created' topic
             producer.send('users_created', json.dumps(res).encode('utf-8'))
         except Exception as e:
             logging.error(f'An error occured: {e}')
@@ -61,8 +68,8 @@ with DAG('user_automation',
          default_args=default_args,
          schedule_interval='@daily',
          catchup=False) as dag:
-
+    # Define the task that will run the stream_data() function 
     streaming_task = PythonOperator(
-        task_id='stream_data_from_api',
+        task_id='stream_data_from_api', # Name of the task
         python_callable=stream_data
     )

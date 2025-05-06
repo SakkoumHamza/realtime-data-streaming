@@ -1,21 +1,21 @@
 import logging
 
-from cassandra.cluster import Cluster
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col
-from pyspark.sql.types import StructType, StructField, StringType
+from cassandra.cluster import Cluster # library to connect to casssandra 
+from pyspark.sql import SparkSession # Principal session 
+from pyspark.sql.functions import from_json, col 
+from pyspark.sql.types import StructType, StructField, StringType # Columns types to define the schema we want
 
 
-def create_keyspace(session):
+def create_keyspace(session):# Key space in cassandra is the top level namespace containing related tables , UDT's, indexes  = database
     session.execute("""
         CREATE KEYSPACE IF NOT EXISTS spark_streams
         WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'};
     """)
-
+    # Simple strategy for single datacenter setup , networkTopologyStrategy for multi ones , replication_factor : how many replicas of the data should be stored across the nodes
     print("Keyspace created successfully!")
 
 
-def create_table(session):
+def create_table(session): # Session represents an active session with cassandra
     session.execute("""
     CREATE TABLE IF NOT EXISTS spark_streams.created_users (
         id UUID PRIMARY KEY,
@@ -34,7 +34,7 @@ def create_table(session):
     print("Table created successfully!")
 
 
-def insert_data(session, **kwargs):
+def insert_data(session, **kwargs): 
     print("inserting data...")
 
     user_id = kwargs.get('id')
@@ -72,9 +72,9 @@ def create_spark_connection():
             .config('spark.jars.packages', "com.datastax.spark:spark-cassandra-connector_2.13:3.4.1,"
                                            "org.apache.spark:spark-sql-kafka-0-10_2.13:3.4.1") \
             .config('spark.cassandra.connection.host', 'localhost') \
-            .getOrCreate()
+            .getOrCreate() # Create or restore active spark session  with cassandra o local host and the packages necessary to connect to cassandra and kafka configured , we give the name spark data streaming as our application name
 
-        s_conn.sparkContext.setLogLevel("ERROR")
+        s_conn.sparkContext.setLogLevel("ERROR") # ONLY want errors , in order to reduce the messages in the logs
         logging.info("Spark connection created successfully!")
     except Exception as e:
         logging.error(f"Couldn't create the spark session due to exception {e}")
@@ -91,6 +91,7 @@ def connect_to_kafka(spark_conn):
             .option('subscribe', 'users_created') \
             .option('startingOffsets', 'earliest') \
             .load()
+        # Load the stream comming formm kafka listening on 9092 from the begining of users_created topic to a spark dataframe
         logging.info("kafka dataframe created successfully")
     except Exception as e:
         logging.warning(f"kafka dataframe could not be created because: {e}")
@@ -103,7 +104,7 @@ def create_cassandra_connection():
         # connecting to the cassandra cluster
         cluster = Cluster(['localhost'])
 
-        cas_session = cluster.connect()
+        cas_session = cluster.connect() # Active connection to cassandra
 
         return cas_session
     except Exception as e:
@@ -113,7 +114,7 @@ def create_cassandra_connection():
 
 def create_selection_df_from_kafka(spark_df):
     schema = StructType([
-        StructField("id", StringType(), False),
+        StructField("id", StringType(), nullable = False), # Id as string because UUID contains letters 
         StructField("first_name", StringType(), False),
         StructField("last_name", StringType(), False),
         StructField("gender", StringType(), False),
@@ -125,22 +126,25 @@ def create_selection_df_from_kafka(spark_df):
         StructField("phone", StringType(), False),
         StructField("picture", StringType(), False)
     ])
+    # This schema will be used for analyzing JSON data comming from kafka
 
     sel = spark_df.selectExpr("CAST(value AS STRING)") \
-        .select(from_json(col('value'), schema).alias('data')).select("data.*")
+        .select(from_json(col('value'), schema).alias('data'))\
+        .select("data.*")
+    
+    # Kafka stores the data in binary format byte array, so we transform them into string, and read it as json to apply the schema defined earlier and give it an alias : data and expand it inthis df called sel 
+
     print(sel)
 
     return sel
 
 
 if __name__ == "__main__":
-    # create spark connection
     spark_conn = create_spark_connection()
 
-    if spark_conn is not None:
-        # connect to kafka with spark connection
+    if spark_conn is not None :
         spark_df = connect_to_kafka(spark_conn)
-        selection_df = create_selection_df_from_kafka(spark_df)
+        selection_df = create_selection_df_from_kafka(spark_df) # kafka data Structured format
         session = create_cassandra_connection()
 
         if session is not None:
@@ -148,11 +152,11 @@ if __name__ == "__main__":
             create_table(session)
 
             logging.info("Streaming is being started...")
-
-            streaming_query = (selection_df.writeStream.format("org.apache.spark.sql.cassandra")
-                               .option('checkpointLocation', '/tmp/checkpoint')
+            # Write streaming data from kfk to csndr
+            streaming_query = (selection_df.writeStream.format("org.apache.spark.sql.cassandra") # Writes data continuously and csndr as the destination
+                               .option('checkpointLocation', '/tmp/checkpoint') # Checkpoint location for fault taulerance
                                .option('keyspace', 'spark_streams')
                                .option('table', 'created_users')
                                .start())
 
-            streaming_query.awaitTermination()
+            streaming_query.awaitTermination() # Keeps the program running until the streamin ends or manually stopped
